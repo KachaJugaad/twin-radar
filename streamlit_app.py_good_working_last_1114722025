@@ -1,0 +1,78 @@
+import streamlit as st
+import folium
+from streamlit_folium import st_folium
+from fetch import get_aircraft_df
+from geopy.distance import geodesic
+
+st.set_page_config(layout="wide")
+st.title("✈️ YVR Twin Radar – Icon Map with Risk Logic")
+
+# Bounding Box toggle
+bbox_choice = st.radio("Bounding Box", ["YVR", "Wide"], index=0)
+BBOX = (47.0, -134.0, 55.0, -118.0) if bbox_choice == "YVR" else (30.0, -150.0, 60.0, -100.0)
+
+# Load aircraft data
+df = get_aircraft_df(bbox=BBOX)
+df = df.dropna(subset=["lat", "lon", "velocity", "track", "callsign"])
+
+if df.empty:
+    st.warning("⚠️ No aircraft found. Try widening the bounding box or wait for traffic.")
+    st.stop()
+
+# YVR coordinates
+YVR_COORDS = (49.1947, -123.1792)
+
+# Create base map
+m = folium.Map(location=[49.0, -123.0], zoom_start=5, tiles="CartoDB positron")
+
+# Add aircraft markers with danger zone detection
+for _, row in df.iterrows():
+    speed = row["velocity"] * 1.943
+    coords = (row["lat"], row["lon"])
+    dist_to_yvr_km = geodesic(coords, YVR_COORDS).km
+    color = "green"
+    is_danger = False
+
+    if speed > 300:
+        color = "red"
+        if dist_to_yvr_km < 50:
+            if abs(row.get("vertical_rate", 0)) > 1500 or not (330 <= row["track"] <= 360 or 0 <= row["track"] <= 30):
+                is_danger = True
+    elif speed > 250:
+        color = "orange"
+
+    popup_text = f"""
+        ✈️ <b>{row['callsign']}</b><br>
+        Speed: {speed:.1f} kn<br>
+        Distance to YVR: {dist_to_yvr_km:.1f} km
+    """
+    if is_danger:
+        popup_text += "<br><b>☢️ DANGER ZONE!</b>"
+
+    folium.Marker(
+        location=coords,
+        popup=popup_text,
+        icon=folium.Icon(color=color, icon="plane", prefix="fa")
+    ).add_to(m)
+
+# Add legend to map
+legend_html = """
+<div style="position: fixed;
+     top: 20px; right: 20px; z-index: 9999;
+     background-color: white; padding: 10px; border: 2px solid gray; font-size:14px;">
+<b>🗺️ Legend</b><br>
+<i class="fa fa-plane" style="color:green"></i> 🟢 Slow (&lt;250 kn)<br>
+<i class="fa fa-plane" style="color:orange"></i> 🟠 Medium (250–300 kn)<br>
+<i class="fa fa-plane" style="color:red"></i> 🔴 Fast (&gt;300 kn)<br><br>
+<b>☢️ Danger Zone:</b><br>
+Red + Near YVR + Anomaly
+</div>
+"""
+m.get_root().html.add_child(folium.Element(legend_html))
+
+# Render map in Streamlit
+st_folium(m, width=1300, height=700)
+
+# Sidebar
+st.sidebar.info("Live OpenSky aircraft feed. Not for navigational use.")
+

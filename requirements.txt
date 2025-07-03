@@ -1,0 +1,7 @@
+streamlit>=1.34
+folium
+streamlit-folium
+pandas
+requests
+geopy
+

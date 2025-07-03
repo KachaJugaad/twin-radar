@@ -1,0 +1,56 @@
+import streamlit as st
+from fetch import get_aircraft_df
+import pydeck as pdk
+import random
+
+st.set_page_config(layout="wide")
+st.title("✈️ YVR Twin Radar – Live Emoji View")
+
+df = get_aircraft_df()
+
+# Assign emoji + color based on velocity (in knots)
+def classify(row):
+    speed = row["velocity"] * 1.943 if row["velocity"] else 0
+    if speed > 300:
+        return "🛫", "red"
+    elif speed > 250:
+        return "✈️", "orange"
+    else:
+        return "🛩", "green"
+
+df[["emoji", "color"]] = df.apply(classify, axis=1, result_type="expand")
+
+# PyDeck TextLayer to show emoji aircraft
+emoji_layer = pdk.Layer(
+    "TextLayer",
+    data=df,
+    get_position='[lon, lat]',
+    get_text="emoji",
+    get_color="color",
+    get_size=24,
+    sizeUnits='pixels',
+    get_angle=0,
+    get_alignment_baseline="'center'"
+)
+
+view_state = pdk.ViewState(latitude=49.0, longitude=-123.0, zoom=5, pitch=30)
+
+st.pydeck_chart(pdk.Deck(
+    map_style="mapbox://styles/mapbox/light-v9",
+    initial_view_state=view_state,
+    layers=[emoji_layer],
+))
+
+# Bill Burr-style quips
+quips = [
+    "We're cruising at 500 knots 'cause Jeff forgot his passport.",
+    "Folks, that bump was turbulence, not karma.",
+    "If you're looking left, you're seeing Seattle. If you're looking right, you're wrong.",
+    "Kyle up front's in a rush—he’s got a dinner date with runway 26L.",
+    "This ain't a Tesla, folks—we can't just stop mid-air."
+]
+st.caption(f"🎤 PA: {random.choice(quips)}")
+
+# Ethics disclaimer
+st.sidebar.warning("⚠️ Data from OpenSky Network. Not for navigation or aviation planning. Position data may be delayed or inaccurate.")
+
