@@ -176,3 +176,48 @@ if st.checkbox("📦 Show Cargo Flight KPIs"):
 
 st.sidebar.info("⚠️ OpenSky live air-traffic feed. Not for real-world flight ops.")
 
+# === KPI Scorecard ===
+if st.checkbox("📊 Show Operational KPI Summary"):
+    total_aircraft = len(df)
+    cargo_count = len(df[df["cargo_type"].isin(["Freighter", "Belly Cargo"])])
+    avg_eta = df["eta_min"].mean()
+
+    eta_15_df = df[df["eta_min"] < 15]
+    n_eta_15 = len(eta_15_df)
+    avg_dist_eta15 = eta_15_df["dist_km"].mean() if n_eta_15 else 0
+    holding_ratio = len(eta_15_df[eta_15_df["hold_status"] != ""]) / n_eta_15 if n_eta_15 else 0
+    crs = n_eta_15 * avg_dist_eta15 * holding_ratio
+
+    # Risk category
+    if crs > 500:
+        crs_status = "🔴 High"
+    elif crs > 200:
+        crs_status = "🟠 Moderate"
+    else:
+        crs_status = "🟢 Low"
+
+    st.markdown(f"""
+    ### 📊 Operational KPIs
+
+    - ✈️ **Total Aircraft Tracked**: `{total_aircraft}`
+    - 📦 **Cargo Aircraft**: `{cargo_count}`
+    - 🕓 **Avg ETA**: `{avg_eta:.1f} min`
+    - 🚥 **Congestion Risk Score (CRS)**: `{crs:.1f}` → {crs_status}
+    """)
+
+# Legend info below
+st.markdown("""
+---
+### ℹ️ Legend & Definitions
+
+- 🟢 ETA Normal (>20 min)
+- 🟠 ETA Tight (10–20 min)
+- 🔴 ETA Risk (<10 min)
+- ☢️ **Danger Zone**: High speed + low altitude + off-course near YVR
+- 🌀 **Holding**: Circling or idling suspected
+- 📦 **Cargo Type**: Freighter (UPS/FDX) or Belly Cargo
+- 🚥 **CRS**: Congestion Risk Score based on aircraft clustering, distance, and idle state
+""")
+
+st.sidebar.info("⚠️ OpenSky live air-traffic feed. Not for real-world flight ops.")
+

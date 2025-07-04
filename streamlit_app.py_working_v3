@@ -134,29 +134,56 @@ for _, row in df.iterrows():
         icon=folium.Icon(color=icon_color, icon="plane", prefix="fa")
     ).add_to(m)
 
-# Display map
 st_folium(m, width=1300, height=700)
 
-# Display legend below map
-st.markdown("---")
-st.subheader("🗺️ Map Legend & Interpretation Guide")
-
-st.markdown("""
-- <span style="color:green">🟢 ETA Normal</span>: Aircraft is on schedule with sufficient buffer.  
-- <span style="color:orange">🟠 ETA Tight</span>: Approaching time pressure; may affect sequencing.  
-- <span style="color:blue">🔴 ETA Risk</span>: Delayed or late; potential cascading delays.  
-- <span style="color:red">☢️ Danger Zone</span>: Abnormal descent, off-course, or unsafe altitude.  
-- 🌀 **Holding**: Aircraft circling or hovering; possible ground delay or air congestion.  
-- 📦 **Cargo Type**:  
-    - **Freighter**: Dedicated cargo aircraft (e.g., FedEx, UPS)  
-    - **Belly Cargo**: Passenger flight carrying cargo in hold
-""", unsafe_allow_html=True)
-
+# KPI summary section
 if st.checkbox("📦 Show Cargo Flight KPIs"):
     st.dataframe(df[[
         "callsign", "airline", "cargo_type", "speed_knots", "eta_min",
         "eta_risk", "altitude_check", "heading_check", "hold_status", "is_danger"
     ]])
+
+# Scorecard for Operational KPIs
+if st.checkbox("📊 Show Operational KPI Summary"):
+    total_aircraft = len(df)
+    cargo_count = len(df[df["cargo_type"].isin(["Freighter", "Belly Cargo")])
+    avg_eta = df["eta_min"].mean()
+
+    eta_15_df = df[df["eta_min"] < 15]
+    n_eta_15 = len(eta_15_df)
+    avg_dist_eta15 = eta_15_df["dist_km"].mean() if n_eta_15 else 0
+    holding_ratio = len(eta_15_df[eta_15_df["hold_status"] != ""]) / n_eta_15 if n_eta_15 else 0
+    crs = n_eta_15 * avg_dist_eta15 * holding_ratio
+
+    if crs > 500:
+        crs_status = "🔴 High"
+    elif crs > 200:
+        crs_status = "🟠 Moderate"
+    else:
+        crs_status = "🟢 Low"
+
+    st.markdown(f"""
+    ### 📊 Operational KPIs
+
+    - ✈️ **Total Aircraft Tracked**: `{total_aircraft}`
+    - 📦 **Cargo Aircraft**: `{cargo_count}`
+    - 🕓 **Avg ETA**: `{avg_eta:.1f} min`
+    - 🚥 **Congestion Risk Score (CRS)**: `{crs:.1f}` → {crs_status}
+    """)
+
+# Legend info below
+st.markdown("""
+---
+### ℹ️ Legend & Definitions
+
+- 🟢 ETA Normal (>20 min)
+- 🟠 ETA Tight (10–20 min)
+- 🔴 ETA Risk (<10 min)
+- ☢️ **Danger Zone**: High speed + low altitude + off-course near YVR
+- 🌀 **Holding**: Circling or idling suspected
+- 📦 **Cargo Type**: Freighter (UPS/FDX) or Belly Cargo
+- 🚥 **CRS**: Congestion Risk Score based on aircraft clustering, distance, and idle state
+""")
 
 st.sidebar.info("⚠️ OpenSky live air-traffic feed. Not for real-world flight ops.")
 
