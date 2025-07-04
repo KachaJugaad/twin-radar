@@ -1,13 +1,13 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-from fetch import get_aircraft_df
+from fetch import get_aircraft_df, track_aircraft_inactivity
 from geopy.distance import geodesic
 import math
 import pandas as pd
 
 st.set_page_config(layout="wide")
-st.title("Radar – Air Cargo Operational Tracker")
+st.title("Radar – Risk-Aware Live Tracker")
 
 # Bounding Box toggle
 bbox_choice = st.radio("Bounding Box", ["YVR", "Wide"], index=0)
@@ -21,7 +21,6 @@ APPROACH_HEADING = 135  # Approx approach angle for YVR RWY 08R
 df = get_aircraft_df(bbox=BBOX)
 df = df.dropna(subset=["lat", "lon", "velocity", "track", "callsign", "baro_alt"])
 
-# Classify aircraft
 def haversine_bearing(lat1, lon1, lat2, lon2):
     dLon = math.radians(lon2 - lon1)
     lat1, lat2 = map(math.radians, [lat1, lat2])
@@ -54,9 +53,6 @@ def classify_aircraft(row):
         "UPS": "UPS",
     }.get(prefix, "Unknown")
 
-    is_cargo = prefix in ["FDX", "UPS"]
-    cargo_type = "Freighter" if is_cargo else ("Belly Cargo" if airline != "Unknown" else "Unknown")
-
     if eta_min > 20:
         eta_risk = "🟢 Normal"
     elif eta_min > 10:
@@ -81,8 +77,6 @@ def classify_aircraft(row):
         heading_status != "✅ OK"
     )
 
-    holding = "🌀 Possible Holding" if speed_knots < 120 and abs(row.get("vertical_rate", 0)) < 100 else ""
-
     return pd.Series({
         "speed_knots": speed_knots,
         "dist_km": dist_to_yvr_km,
@@ -91,33 +85,27 @@ def classify_aircraft(row):
         "altitude_check": alt_status,
         "heading_check": heading_status,
         "airline": airline,
-        "cargo_type": cargo_type,
-        "is_danger": is_danger,
-        "hold_status": holding
+        "is_danger": is_danger
     })
 
-# Enrich DataFrame
+# Add analysis columns
 df = df.join(df.apply(classify_aircraft, axis=1))
+df = track_aircraft_inactivity(df)
 
-# Cargo toggle view
-cargo_view = st.sidebar.checkbox("📦 Focus on Cargo Flights Only")
-if cargo_view:
-    df = df[df["cargo_type"].isin(["Freighter", "Belly Cargo"])]
-
-# Map
+# Create map
 m = folium.Map(location=[49.0, -123.0], zoom_start=5, tiles="CartoDB positron")
 
+# Add markers
 for _, row in df.iterrows():
     popup = f"""
         ✈️ <b>{row['callsign']}</b><br>
         Airline: {row['airline']}<br>
-        Cargo Type: {row['cargo_type']}<br>
         Speed: {row['speed_knots']:.1f} kn<br>
         ETA: {row['eta_min']:.1f} min – {row['eta_risk']}<br>
         Altitude Check: {row['altitude_check']}<br>
         Heading Check: {row['heading_check']}<br>
-        {row['hold_status']}<br>
-        Distance: {row['dist_km']:.1f} km
+        Distance: {row['dist_km']:.1f} km<br>
+        Movement: {row['movement_status']}
     """
     if row["is_danger"]:
         popup += "<br><b>☢️ DANGER ZONE</b>"
@@ -134,28 +122,32 @@ for _, row in df.iterrows():
         icon=folium.Icon(color=icon_color, icon="plane", prefix="fa")
     ).add_to(m)
 
-# Legend (static placement that stays visible)
+# Add legend
 legend_html = """
-<div style="position: absolute; bottom: 30px; left: 30px; z-index: 9999;
+<div style="position: fixed;
+     top: 20px; right: 20px; z-index: 9999;
      background-color: white; padding: 10px; border: 2px solid gray; font-size:14px;">
 <b>🗺️ Legend</b><br>
 <i class="fa fa-plane" style="color:green"></i> 🟢 ETA Normal<br>
 <i class="fa fa-plane" style="color:orange"></i> 🟠 ETA Tight<br>
 <i class="fa fa-plane" style="color:blue"></i> 🔴 ETA Risk<br>
-<i class="fa fa-plane" style="color:red"></i> ☢️ Danger Zone<br>
-<b>🌀 Holding</b>: Possible circling or idle<br>
-<b>📦 Cargo Type</b>: Freighter or Belly<br>
+<i class="fa fa-plane" style="color:red"></i> ☢️ Danger Zone<br><br>
+<b>🚨 Danger Zone</b>: Red + near YVR + vertical + alt anomaly + heading off
 </div>
 """
 m.get_root().html.add_child(folium.Element(legend_html))
 
+# Display map
 st_folium(m, width=1300, height=700)
 
-if st.checkbox("📦 Show Cargo Flight KPIs"):
+# Optional debug table
+if st.checkbox("📊 Show risk analysis table"):
     st.dataframe(df[[
-        "callsign", "airline", "cargo_type", "speed_knots", "eta_min",
-        "eta_risk", "altitude_check", "heading_check", "hold_status", "is_danger"
+        "callsign", "airline", "speed_knots", "eta_min",
+        "eta_risk", "altitude_check", "heading_check",
+        "movement_status", "is_danger"
     ]])
 
-st.sidebar.info("⚠️ OpenSky live air-traffic feed. Not for real-world flight ops.")
+# Sidebar
+st.sidebar.info("⚠️ OpenSky live air-traffic feed. Not for real-world flight operations.")
 

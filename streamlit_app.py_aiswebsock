@@ -1,13 +1,15 @@
+# --- streamlit_app.py ---
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-from fetch import get_aircraft_df
+from fetch import get_aircraft_df, track_aircraft_inactivity
 from geopy.distance import geodesic
 import math
 import pandas as pd
+from ais_stream import ais_queue, start_ais_stream
 
 st.set_page_config(layout="wide")
-st.title("Radar – Air Cargo Operational Tracker")
+st.title("Radar – Risk-Aware Live Tracker")
 
 # Bounding Box toggle
 bbox_choice = st.radio("Bounding Box", ["YVR", "Wide"], index=0)
@@ -15,13 +17,12 @@ BBOX = (47.0, -134.0, 55.0, -118.0) if bbox_choice == "YVR" else (30.0, -150.0, 
 
 # YVR coordinates
 YVR_COORDS = (49.1947, -123.1792)
-APPROACH_HEADING = 135  # Approx approach angle for YVR RWY 08R
+APPROACH_HEADING = 135
 
-# Load data
+# Load aircraft data
 df = get_aircraft_df(bbox=BBOX)
 df = df.dropna(subset=["lat", "lon", "velocity", "track", "callsign", "baro_alt"])
 
-# Classify aircraft
 def haversine_bearing(lat1, lon1, lat2, lon2):
     dLon = math.radians(lon2 - lon1)
     lat1, lat2 = map(math.radians, [lat1, lat2])
@@ -35,15 +36,12 @@ def classify_aircraft(row):
     dist_to_yvr_km = geodesic(coords, YVR_COORDS).km
     dist_nm = dist_to_yvr_km * 0.539957
     eta_min = (dist_nm / speed_knots) * 60 if speed_knots > 50 else 999
-
     expected_alt = dist_nm * 300
     actual_alt = row["baro_alt"]
     alt_diff = actual_alt - expected_alt
-
     expected_bearing = haversine_bearing(row["lat"], row["lon"], *YVR_COORDS)
     heading_diff = abs(row["track"] - expected_bearing)
     heading_diff = min(heading_diff, 360 - heading_diff)
-
     prefix = row["callsign"][:3].upper()
     airline = {
         "ACA": "Air Canada",
@@ -53,26 +51,19 @@ def classify_aircraft(row):
         "FDX": "FedEx",
         "UPS": "UPS",
     }.get(prefix, "Unknown")
-
-    is_cargo = prefix in ["FDX", "UPS"]
-    cargo_type = "Freighter" if is_cargo else ("Belly Cargo" if airline != "Unknown" else "Unknown")
-
     if eta_min > 20:
         eta_risk = "🟢 Normal"
     elif eta_min > 10:
         eta_risk = "🟠 Tight"
     else:
         eta_risk = "🔴 High Risk"
-
     if alt_diff > 1500:
         alt_status = "🔻 Too High"
     elif alt_diff < -1500:
         alt_status = "⚠️ Low"
     else:
         alt_status = "✅ OK"
-
     heading_status = "✅ OK" if heading_diff < 30 else "⚠️ Off-Course"
-
     is_danger = (
         speed_knots > 300 and
         dist_to_yvr_km < 50 and
@@ -80,9 +71,6 @@ def classify_aircraft(row):
         alt_status != "✅ OK" and
         heading_status != "✅ OK"
     )
-
-    holding = "🌀 Possible Holding" if speed_knots < 120 and abs(row.get("vertical_rate", 0)) < 100 else ""
-
     return pd.Series({
         "speed_knots": speed_knots,
         "dist_km": dist_to_yvr_km,
@@ -91,71 +79,118 @@ def classify_aircraft(row):
         "altitude_check": alt_status,
         "heading_check": heading_status,
         "airline": airline,
-        "cargo_type": cargo_type,
-        "is_danger": is_danger,
-        "hold_status": holding
+        "is_danger": is_danger
     })
 
-# Enrich DataFrame
+# Add analysis columns
 df = df.join(df.apply(classify_aircraft, axis=1))
+df = track_aircraft_inactivity(df)
 
-# Cargo toggle view
-cargo_view = st.sidebar.checkbox("📦 Focus on Cargo Flights Only")
-if cargo_view:
-    df = df[df["cargo_type"].isin(["Freighter", "Belly Cargo"])]
+# Start AIS stream
+if "ais_started" not in st.session_state:
+    start_ais_stream()
+    st.session_state["ais_started"] = True
+    st.sidebar.subheader("📡 AIS Stream Status")
+# Fetch ship data from AIS queue
+ship_data = []
+while not ais_queue.empty():
+    try:
+        item = ais_queue.get_nowait()
+        pos = item.get("Message", {}).get("Position", {})
+        meta = item.get("MetaData", {})
+        ship_data.append({
+            "mmsi": meta.get("MMSI"),
+            "lat": pos.get("Lat"),
+            "lon": pos.get("Lon"),
+            "speed": pos.get("SOG"),
+            "course": pos.get("COG"),
+            "heading": pos.get("Heading")
+        })
+    except Exception as e:
+        st.warning(f"Error parsing AIS data: {e}")
 
-# Map
-m = folium.Map(location=[49.0, -123.0], zoom_start=5, tiles="CartoDB positron")
+# Count how many AIS messages are in the queue
+ais_msg_count = ais_queue.qsize()
+st.sidebar.write(f"🔁 Messages in queue: `{ais_msg_count}`")
 
+# Show sample message if available
+if ais_msg_count > 0:
+    try:
+        example = ais_queue.queue[0]  # Peek first item
+        st.sidebar.write("✅ WebSocket: Connected")
+        st.sidebar.json(example)
+    except Exception as e:
+        st.sidebar.error(f"Error reading AIS queue: {e}")
+else:
+    st.sidebar.warning("⚠️ No AIS data received yet.")
+#ship_df = pd.DataFrame(ship_data).dropna(subset=["lat", "lon"])
+filtered_ship_data = [
+    row for row in ship_data if row.get("lat") is not None and row.get("lon") is not None
+]
+if filtered_ship_data:
+    ship_df = pd.DataFrame(filtered_ship_data)
+else:
+    ship_df = pd.DataFrame(columns=["mmsi", "lat", "lon", "speed", "course", "heading"])
+
+if st.checkbox("🔍 Show raw AIS messages"):
+    st.json(ship_data[:3])
+
+
+# Create map
+m = folium.Map(location=[49.0, -123.0], zoom_start=6, tiles="CartoDB positron")
+
+# Aircraft markers
 for _, row in df.iterrows():
     popup = f"""
         ✈️ <b>{row['callsign']}</b><br>
         Airline: {row['airline']}<br>
-        Cargo Type: {row['cargo_type']}<br>
         Speed: {row['speed_knots']:.1f} kn<br>
         ETA: {row['eta_min']:.1f} min – {row['eta_risk']}<br>
         Altitude Check: {row['altitude_check']}<br>
         Heading Check: {row['heading_check']}<br>
-        {row['hold_status']}<br>
-        Distance: {row['dist_km']:.1f} km
+        Distance: {row['dist_km']:.1f} km<br>
+        Movement: {row['movement_status']}
     """
     if row["is_danger"]:
         popup += "<br><b>☢️ DANGER ZONE</b>"
-
     icon_color = "red" if row["is_danger"] else (
         "orange" if row["eta_risk"].startswith("🟠") else (
             "blue" if row["eta_risk"].startswith("🔴") else "green"
         )
     )
-
     folium.Marker(
         location=[row["lat"], row["lon"]],
         popup=popup,
         icon=folium.Icon(color=icon_color, icon="plane", prefix="fa")
     ).add_to(m)
 
-# Legend (static placement that stays visible)
-legend_html = """
-<div style="position: absolute; bottom: 30px; left: 30px; z-index: 9999;
-     background-color: white; padding: 10px; border: 2px solid gray; font-size:14px;">
-<b>🗺️ Legend</b><br>
-<i class="fa fa-plane" style="color:green"></i> 🟢 ETA Normal<br>
-<i class="fa fa-plane" style="color:orange"></i> 🟠 ETA Tight<br>
-<i class="fa fa-plane" style="color:blue"></i> 🔴 ETA Risk<br>
-<i class="fa fa-plane" style="color:red"></i> ☢️ Danger Zone<br>
-<b>🌀 Holding</b>: Possible circling or idle<br>
-<b>📦 Cargo Type</b>: Freighter or Belly<br>
-</div>
-"""
-m.get_root().html.add_child(folium.Element(legend_html))
+# Ship markers
+for _, row in ship_df.iterrows():
+    popup = f"""
+        🚢 MMSI: {row['mmsi']}<br>
+        Speed: {row['speed']} kn<br>
+        Course: {row['course']}°
+    """
+    folium.CircleMarker(
+        location=[row["lat"], row["lon"]],
+        radius=5,
+        color="navy",
+        fill=True,
+        fill_opacity=0.6,
+        popup=popup
+    ).add_to(m)
 
+# Display map
 st_folium(m, width=1300, height=700)
 
-if st.checkbox("📦 Show Cargo Flight KPIs"):
+# Optional debug table
+if st.checkbox("📊 Show risk analysis table"):
     st.dataframe(df[[
-        "callsign", "airline", "cargo_type", "speed_knots", "eta_min",
-        "eta_risk", "altitude_check", "heading_check", "hold_status", "is_danger"
+        "callsign", "airline", "speed_knots", "eta_min",
+        "eta_risk", "altitude_check", "heading_check",
+        "movement_status", "is_danger"
     ]])
 
-st.sidebar.info("⚠️ OpenSky live air-traffic feed. Not for real-world flight ops.")
+# Sidebar
+st.sidebar.info("⚠️ OpenSky + AISStream live traffic feed. Not for real-world flight operations.")
 
